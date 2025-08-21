@@ -4,6 +4,272 @@ import { AudinateDanteModule } from './main.js'
 import { parseSubscriptionInfoFromOptions, parseSubscriptionVectorInfoFromOptions } from './options.js'
 
 function generateFeedbacks(self: AudinateDanteModule): CompanionFeedbackDefinitions {
+	// Check if this is a large domain that could cause performance issues
+	const rxChannelCount = self.domain?.devices?.reduce((total, device) => 
+		total + (device?.rxChannels?.length ?? 0), 0) ?? 0
+	
+	const maxChannels = self.config.maxChannelsForDropdowns || 500
+	
+	// Debug logging to help understand which feedbacks are being used
+	self.log('debug', `Domain has ${rxChannelCount} RX channels, max configured: ${maxChannels}`)
+	
+	if (rxChannelCount > maxChannels) {
+		// Return minimal feedbacks for large domains to prevent system hangs
+		self.log('debug', 'Using minimal feedbacks for large domain')
+		return generateMinimalFeedbacks(self)
+	}
+	
+	self.log('debug', 'Using full feedbacks for normal domain')
+	return generateFullFeedbacks(self)
+}
+
+function generateMinimalFeedbacks(self: AudinateDanteModule): CompanionFeedbackDefinitions {
+	// Minimal feedbacks for large domains - text input instead of dropdowns
+	const feedbacks: CompanionFeedbackDefinitions = {
+		subscriptionStatus: {
+			type: 'boolean' as const,
+			name: 'Subscription Status (Simple Text)',
+			description: 'For large domains - use semicolon-separated channel mappings in a single field',
+			defaultStyle: {
+				bgcolor: 0x00ff00,
+				color: 0x000000,
+			},
+			options: [
+				{
+					id: 'rxDevice',
+					type: 'dropdown',
+					label: 'RX Device',
+					default: '',
+					choices: [
+						{ id: '', label: 'Select a device...' },
+						...(self.domain?.devices?.map((d) => {
+							if (d?.name && d.id) {
+								return {
+									id: d.name,
+									label: `${d.name} (${d.rxChannels?.length || 0} RX channels)`,
+								}
+							}
+							return undefined
+						}).filter((device): device is { id: string; label: string } => device !== undefined) ?? []),
+					],
+					tooltip: 'Select the RX device to check',
+				},
+				{
+					id: 'expectedMappings',
+					type: 'textinput',
+					label: 'Channel Mappings',
+					default: '',
+					tooltip: 'Format: 01=01@CF107-AllenHth-FOH; 02=02@CF107-AllenHth-FOH; 03=03@CF107-AllenHth-FOH; etc (semicolon separated, empty after = means unsubscribed)',
+					isVisible: (options) => !!options.rxDevice,
+				},
+			],
+			callback: (feedback: any) => {
+				const rxDeviceName = feedback.options.rxDevice as string
+				const expectedMappings = feedback.options.expectedMappings as string
+
+				if (!rxDeviceName || !expectedMappings) {
+					return false
+				}
+
+				// Find the RX device
+				const rxDevice = self.domain?.devices?.find(d => d?.name === rxDeviceName)
+				if (!rxDevice) {
+					return false
+				}
+
+				// Parse expected channel mappings (semicolon separated)
+				const mappings = expectedMappings.split(';').map(s => s.trim()).filter(s => s)
+
+				for (const mapping of mappings) {
+					const [rxChannelName, expectedTxMapping] = mapping.split('=')
+					if (!rxChannelName?.trim()) continue
+
+					const rxChannel = rxDevice.rxChannels?.find(c => c?.name === rxChannelName.trim())
+					if (!rxChannel) {
+						// If we expect a channel that doesn't exist, that's a mismatch
+						return false
+					}
+
+					let expectedTxChannelName = ''
+					let expectedTxDeviceName = ''
+					
+					if (expectedTxMapping?.trim()) {
+						const txParts = expectedTxMapping.trim().split('@')
+						expectedTxChannelName = txParts[0] || ''
+						expectedTxDeviceName = txParts[1] || ''
+					}
+
+					// Check if subscription matches expected values
+					const actualTxDevice = rxChannel.subscribedDevice || ''
+					const actualTxChannel = rxChannel.subscribedChannel || ''
+
+					if (actualTxDevice !== expectedTxDeviceName || actualTxChannel !== expectedTxChannelName) {
+						return false
+					}
+				}
+
+				return true
+			},
+			learn: (feedback) => {
+				const rxDeviceName = feedback.options.rxDevice as string
+				if (!rxDeviceName) {
+					return feedback.options
+				}
+
+				const rxDevice = self.domain?.devices?.find(d => d?.name === rxDeviceName)
+				if (!rxDevice || !rxDevice.rxChannels) {
+					return feedback.options
+				}
+
+				// Generate semicolon-separated mappings from current subscriptions
+				const mappings = rxDevice.rxChannels
+					.filter(channel => channel?.name)
+					.map(channel => {
+						const rxChannelName = channel!.name
+						const subscribedChannel = channel!.subscribedChannel || ''
+						const subscribedDevice = channel!.subscribedDevice || ''
+						
+						if (subscribedChannel && subscribedDevice) {
+							return `${rxChannelName}=${subscribedChannel}@${subscribedDevice}`
+						} else {
+							return `${rxChannelName}=`
+						}
+					})
+					.join('; ')
+
+				return {
+					...feedback.options,
+					expectedMappings: mappings,
+				}
+			},
+		},
+		multiChannelSubscriptionStatusSimple: {
+			type: 'boolean' as const,
+			name: 'Multi-Channel Subscription Status (Simple Text)',
+			description: 'For large domains - use semicolon-separated channel mappings in a single field',
+			defaultStyle: {
+				bgcolor: 0x00ff00,
+				color: 0x000000,
+			},
+			options: [
+				{
+					id: 'rxDevice',
+					type: 'dropdown',
+					label: 'RX Device',
+					default: '',
+					choices: [
+						{ id: '', label: 'Select a device...' },
+						...(self.domain?.devices?.map((d) => {
+							if (d?.name && d.id) {
+								return {
+									id: d.name,
+									label: `${d.name} (${d.rxChannels?.length || 0} RX channels)`,
+								}
+							}
+							return undefined
+						}).filter((device): device is { id: string; label: string } => device !== undefined) ?? []),
+					],
+					tooltip: 'Select the RX device to check',
+				},
+				{
+					id: 'expectedMappings',
+					type: 'textinput',
+					label: 'Channel Mappings',
+					default: '',
+					tooltip: 'Format: 01=01@CF107-AllenHth-FOH; 02=02@CF107-AllenHth-FOH; 03=03@CF107-AllenHth-FOH; etc (semicolon separated, empty after = means unsubscribed)',
+					isVisible: (options) => !!options.rxDevice,
+				},
+			],
+			callback: (feedback: any) => {
+				const rxDeviceName = feedback.options.rxDevice as string
+				const expectedMappings = feedback.options.expectedMappings as string
+
+				if (!rxDeviceName || !expectedMappings) {
+					return false
+				}
+
+				// Find the RX device
+				const rxDevice = self.domain?.devices?.find(d => d?.name === rxDeviceName)
+				if (!rxDevice) {
+					return false
+				}
+
+				// Parse expected channel mappings (semicolon separated)
+				const mappings = expectedMappings.split(';').map(s => s.trim()).filter(s => s)
+
+				for (const mapping of mappings) {
+					const [rxChannelName, expectedTxMapping] = mapping.split('=')
+					if (!rxChannelName?.trim()) continue
+
+					const rxChannel = rxDevice.rxChannels?.find(c => c?.name === rxChannelName.trim())
+					if (!rxChannel) {
+						// If we expect a channel that doesn't exist, that's a mismatch
+						return false
+					}
+
+					let expectedTxChannelName = ''
+					let expectedTxDeviceName = ''
+					
+					if (expectedTxMapping?.trim()) {
+						const txParts = expectedTxMapping.trim().split('@')
+						expectedTxChannelName = txParts[0] || ''
+						expectedTxDeviceName = txParts[1] || ''
+					}
+
+					// Check if subscription matches expected values
+					const actualTxDevice = rxChannel.subscribedDevice || ''
+					const actualTxChannel = rxChannel.subscribedChannel || ''
+
+					if (actualTxDevice !== expectedTxDeviceName || actualTxChannel !== expectedTxChannelName) {
+						return false
+					}
+				}
+
+				return true
+			},
+			learn: (feedback) => {
+				const rxDeviceName = feedback.options.rxDevice as string
+				if (!rxDeviceName) {
+					return feedback.options
+				}
+
+				const rxDevice = self.domain?.devices?.find(d => d?.name === rxDeviceName)
+				if (!rxDevice || !rxDevice.rxChannels) {
+					return feedback.options
+				}
+
+				// Generate semicolon-separated mappings from current subscriptions
+				const mappings = rxDevice.rxChannels
+					.filter(channel => channel?.name)
+					.map(channel => {
+						const rxChannelName = channel!.name
+						const subscribedChannel = channel!.subscribedChannel || ''
+						const subscribedDevice = channel!.subscribedDevice || ''
+						
+						if (subscribedChannel && subscribedDevice) {
+							return `${rxChannelName}=${subscribedChannel}@${subscribedDevice}`
+						} else {
+							return `${rxChannelName}=`
+						}
+					})
+					.join('; ')
+
+				return {
+					...feedback.options,
+					expectedMappings: mappings,
+				}
+			},
+		},
+	}
+	
+	// Debug logging to verify feedback count
+	const feedbackKeys = Object.keys(feedbacks)
+	self.log('debug', `generateMinimalFeedbacks: Created ${feedbackKeys.length} feedbacks: ${feedbackKeys.join(', ')}`)
+	
+	return feedbacks
+}
+
+function generateFullFeedbacks(self: AudinateDanteModule): CompanionFeedbackDefinitions {
 	const variableSelector = [1, 2, 3, 4].map((s) => ({
 		id: `rx-selector-${s}`,
 		label: `Selector #${s}`,
@@ -409,6 +675,123 @@ function generateFeedbacks(self: AudinateDanteModule): CompanionFeedbackDefiniti
 				return {
 					...action.options,
 					...optionsSubset,
+				}
+			},
+		},
+		multiChannelSubscriptionSimple: {
+			type: 'boolean',
+			name: 'Multi-Channel Subscription Status (Simple Text)',
+			description: 'For large domains - use semicolon-separated channel mappings in a single field',
+			defaultStyle: {
+				bgcolor: 0x00ff00,
+				color: 0x000000,
+			},
+			options: [
+				{
+					id: 'rxDevice',
+					type: 'dropdown',
+					label: 'RX Device',
+					default: '',
+					choices: [
+						{ id: '', label: 'Select a device...' },
+						...(self.domain?.devices?.map((d) => {
+							if (d?.name && d.id) {
+								return {
+									id: d.name,
+									label: `${d.name} (${d.rxChannels?.length || 0} RX channels)`,
+								}
+							}
+							return undefined
+						}).filter((device): device is { id: string; label: string } => device !== undefined) ?? []),
+					],
+					tooltip: 'Select the RX device to check',
+				},
+				{
+					id: 'expectedMappings',
+					type: 'textinput',
+					label: 'Channel Mappings',
+					default: '',
+					tooltip: 'Format: 01=01@CF107-AllenHth-FOH; 02=02@CF107-AllenHth-FOH; 03=03@CF107-AllenHth-FOH; etc (semicolon separated, empty after = means unsubscribed)',
+					isVisible: (options) => !!options.rxDevice,
+				},
+			],
+			callback: (feedback) => {
+				const rxDeviceName = feedback.options.rxDevice as string
+				const expectedMappings = feedback.options.expectedMappings as string
+
+				if (!rxDeviceName || !expectedMappings) {
+					return false
+				}
+
+				// Find the RX device
+				const rxDevice = self.domain?.devices?.find(d => d?.name === rxDeviceName)
+				if (!rxDevice) {
+					return false
+				}
+
+				// Parse expected channel mappings (semicolon separated)
+				const mappings = expectedMappings.split(';').map(s => s.trim()).filter(s => s)
+
+				for (const mapping of mappings) {
+					const [rxChannelName, expectedTxMapping] = mapping.split('=')
+					if (!rxChannelName?.trim()) continue
+
+					const rxChannel = rxDevice.rxChannels?.find(c => c?.name === rxChannelName.trim())
+					if (!rxChannel) {
+						// If we expect a channel that doesn't exist, that's a mismatch
+						return false
+					}
+
+					let expectedTxChannelName = ''
+					let expectedTxDeviceName = ''
+					
+					if (expectedTxMapping?.trim()) {
+						const txParts = expectedTxMapping.trim().split('@')
+						expectedTxChannelName = txParts[0] || ''
+						expectedTxDeviceName = txParts[1] || ''
+					}
+
+					// Check if subscription matches expected values
+					const actualTxDevice = rxChannel.subscribedDevice || ''
+					const actualTxChannel = rxChannel.subscribedChannel || ''
+
+					if (actualTxDevice !== expectedTxDeviceName || actualTxChannel !== expectedTxChannelName) {
+						return false
+					}
+				}
+
+				return true
+			},
+			learn: (feedback) => {
+				const rxDeviceName = feedback.options.rxDevice as string
+				if (!rxDeviceName) {
+					return feedback.options
+				}
+
+				const rxDevice = self.domain?.devices?.find(d => d?.name === rxDeviceName)
+				if (!rxDevice || !rxDevice.rxChannels) {
+					return feedback.options
+				}
+
+				// Generate semicolon-separated mappings from current subscriptions
+				const mappings = rxDevice.rxChannels
+					.filter(channel => channel?.name)
+					.map(channel => {
+						const rxChannelName = channel!.name
+						const subscribedChannel = channel!.subscribedChannel || ''
+						const subscribedDevice = channel!.subscribedDevice || ''
+						
+						if (subscribedChannel && subscribedDevice) {
+							return `${rxChannelName}=${subscribedChannel}@${subscribedDevice}`
+						} else {
+							return `${rxChannelName}=`
+						}
+					})
+					.join('; ')
+
+				return {
+					...feedback.options,
+					expectedMappings: mappings,
 				}
 			},
 		},

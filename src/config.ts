@@ -3,4 +3,6 @@ export type ConfigType = {
 	apikey: string
 	domainID: string
 	disableCertificateValidation: boolean
+	pollInterval?: number
+	maxChannelsForDropdowns?: number
 }
