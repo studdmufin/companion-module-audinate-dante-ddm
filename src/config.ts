@@ -5,4 +5,5 @@ export type ConfigType = {
 	disableCertificateValidation: boolean
 	pollInterval?: number
 	maxChannelsForDropdowns?: number
+	fullFetchInterval?: number
 }

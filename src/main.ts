@@ -12,6 +12,7 @@ import { ApolloClient, NormalizedCacheObject } from '@apollo/client'
 import { getApolloClient } from './apolloClient.js'
 import { getDomain } from './dante-api/getDomain.js'
 import { getDomainOptimized } from './dante-api/getDomainOptimized.js'
+import { getDomainSubscriptions } from './dante-api/getDomainSubscriptions.js'
 import { getDomains } from './dante-api/getDomains.js'
 
 import { DomainQuery, DomainsQuery } from './graphql-codegen/graphql.js'
@@ -30,6 +31,10 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 	domains?: DomainsQuery['domains']
 	domain: DomainQuery['domain']
 	apolloClient?: ApolloClient<NormalizedCacheObject>
+
+	// Cache of last generated definitions to avoid unnecessary UI rebuilds
+	private _lastActionsHash?: string
+	private _lastFeedbacksHash?: string
 
 	pollDomainAndUpdateFeedbacksInterval?: NodeJS.Timeout
 	
@@ -70,8 +75,8 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 
 		this.log('info', `Setting up companion components...`)
 		this.setVariableDefinitions(generateVariables())
-		this.setFeedbackDefinitions(generateFeedbacks(this))
-		this.setActionDefinitions(generateActions(this))
+		this._maybeUpdateFeedbacks()
+		this._maybeUpdateActions()
 		this.setPresetDefinitions(generatePresets())
 
 		// Start in connecting state while background tasks warm up
@@ -97,8 +102,8 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 				this.log('debug', `Domain ${this.config.domainID} selected, polling for device data...`)
 				await this.pollDomainAndUpdateFeedbacks()
 				// Update feedback and action definitions now that we have domain data
-				this.setFeedbackDefinitions(generateFeedbacks(this))
-				this.setActionDefinitions(generateActions(this))
+				this._maybeUpdateFeedbacks()
+				this._maybeUpdateActions()
 			} else {
 				this.log('info', 'Domains loaded but no domain selected. Please select a domain in module configuration.')
 				this.updateStatus(InstanceStatus.BadConfig, 'Please select a domain')
@@ -123,10 +128,18 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 		this.log('debug', `Getting specified Domain (${this.config.domainID})`)
 
 		try {
-			// Always do full fetch for reliable, up-to-date data
-			this.pollCount++
-			this.log('debug', `Poll ${this.pollCount}: fetching domain data`)
-			this.domain = await getDomainOptimized(this, true) // Always use network-first
+            // Decide between lightweight subscription-only polls and full domain fetches.
+            // Perform a full fetch on the first poll and every 10th poll to refresh full metadata.
+            this.pollCount++
+			const fullFetchInterval = this.config.fullFetchInterval || 10
+			const doFullFetch = this.pollCount === 1 || this.pollCount % fullFetchInterval === 0
+			if (doFullFetch) {
+				this.log('debug', `Poll ${this.pollCount}: performing full domain fetch`)
+				this.domain = await getDomainOptimized(this, true)
+			} else {
+				this.log('debug', `Poll ${this.pollCount}: fetching domain subscription state`)
+				this.domain = await getDomainSubscriptions(this, true) // network-first for up-to-date subscription state
+			}
 
 			if (!this.domain) {
 				this.log('error', `Domain ${this.config.domainID} not found. Available domains: ${JSON.stringify(this.domains?.map(d => d?.id))}`)
@@ -159,8 +172,8 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 				this.log('warn', `Large domain detected (${rxChannelCount} RX channels > ${maxChannels} limit). Using text-input feedbacks to prevent system hang.`)
 				if (this.pollCount === 1) {
 					// Only generate minimal feedbacks once for large domains
-					this.setFeedbackDefinitions(generateFeedbacks(this))
-					this.setActionDefinitions(generateActions(this))
+					this._maybeUpdateFeedbacks()
+					this._maybeUpdateActions()
 				}
 				// Always check feedbacks since we always have fresh data now
 				this.checkFeedbacks()
@@ -168,8 +181,8 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 				// For normal-sized domains, update definitions periodically and always check feedbacks
 				if (this.pollCount === 1 || this.pollCount % 10 === 0) {
 					this.log('debug', 'Updating feedback and action definitions with fresh domain data')
-					this.setFeedbackDefinitions(generateFeedbacks(this))
-					this.setActionDefinitions(generateActions(this))
+					this._maybeUpdateFeedbacks()
+					this._maybeUpdateActions()
 				}
 				// Always check feedbacks since we always have fresh data now
 				this.checkFeedbacks()
@@ -215,8 +228,8 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 			this.log('info', `Force full fetch completed: ${deviceCount} devices, ${rxChannelCount} RX channels, ${txChannelCount} TX channels`)
 			
 			// Update feedback and action definitions with fresh data
-			this.setFeedbackDefinitions(generateFeedbacks(this))
-			this.setActionDefinitions(generateActions(this))
+			this._maybeUpdateFeedbacks()
+			this._maybeUpdateActions()
 			
 			// Force feedback check with fresh data
 			this.checkFeedbacks()
@@ -237,6 +250,40 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 		this.log('info', `Configuration updated`)
 		this.log('debug', JSON.stringify({ ...config, apikey: '**********' }, null, 2))
 		await this.init(config)
+	}
+
+	// Only set action definitions if they changed to avoid UI thrash
+	private _maybeUpdateActions(): void {
+		try {
+			const actions = generateActions(this)
+			const hash = JSON.stringify(actions)
+			if (hash !== this._lastActionsHash) {
+				this.log('debug', 'Action definitions changed, updating UI')
+				this.setActionDefinitions(actions)
+				this._lastActionsHash = hash
+			} else {
+				this.log('debug', 'Action definitions unchanged, skipping update')
+			}
+		} catch (e) {
+			this.log('error', `Error updating actions: ${e}`)
+		}
+	}
+
+	// Only set feedback definitions if they changed to avoid UI thrash
+	private _maybeUpdateFeedbacks(): void {
+		try {
+			const feedbacks = generateFeedbacks(this)
+			const hash = JSON.stringify(feedbacks)
+			if (hash !== this._lastFeedbacksHash) {
+				this.log('debug', 'Feedback definitions changed, updating UI')
+				this.setFeedbackDefinitions(feedbacks)
+				this._lastFeedbacksHash = hash
+			} else {
+				this.log('debug', 'Feedback definitions unchanged, skipping update')
+			}
+		} catch (e) {
+			this.log('error', `Error updating feedbacks: ${e}`)
+		}
 	}
 
 	// Return config fields for web config
@@ -297,10 +344,20 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 				type: 'number',
 				label: 'Poll Interval (ms)',
 				width: 8,
-				tooltip: 'How often to refresh domain data. Default 30 seconds provides good balance of responsiveness and server load.',
+				tooltip: 'How often to refresh domain data. Range: 1000ms (1s) to 60000ms (60s).',
 				default: 30000,
-				min: 5000,
-				max: 300000,
+				min: 1000,
+				max: 60000,
+			},
+			{
+				id: 'fullFetchInterval',
+				type: 'number',
+				label: 'Full Fetch Interval (polls)',
+				width: 8,
+				tooltip: 'How often (in number of polls) to perform a full domain fetch. Default 10.',
+				default: 10,
+				min: 1,
+				max: 1000,
 			},
 			{
 				id: 'maxChannelsForDropdowns',
@@ -309,8 +366,8 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 				width: 8,
 				tooltip: 'Maximum RX channels before switching to text-input mode to prevent UI hangs.',
 				default: 500,
-				min: 50,
-				max: 2000,
+				min: 10,
+				max: 10000,
 			},
 			{
 				id: 'message',
