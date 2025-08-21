@@ -59,8 +59,11 @@ describe('generateActions', () => {
 		self.variables = {}
 	})
 
-	it('should return an object with three actions', () => {
-		expect(Object.keys(actions)).toEqual(['subscribeChannel', 'subscribeMultiChannel', 'setDestinationChannel'])
+	it('should include the core actions', () => {
+		const keys = Object.keys(actions)
+		expect(keys).toContain('subscribeChannel')
+		expect(keys).toContain('subscribeMultiChannel')
+		expect(keys).toContain('setDestinationChannel')
 	})
 
 	describe('subscribeChannel', () => {

@@ -23,7 +23,7 @@ check_module_versions
 
 # Creates a .tgz file ready to be imported into Companion v4.
 # This script should not be called directly. Instead, run it through:
-#   > yarn run build:module
+#   > npm run build:module
 
 MODULE_NAME="companion-module-audinate-dante-ddm"
 
@@ -32,13 +32,22 @@ rm -rf $MODULE_NAME
 
 mkdir $MODULE_NAME
 
+# 1) Copy manifest files and package.json first
 cp -R \
-	LICENSE \
-	README.md \
-	companion \
-	dist \
-	node_modules \
-	$MODULE_NAME
+  LICENSE \
+  README.md \
+  package.json \
+  $MODULE_NAME
+
+# 2) Install production-only dependencies INTO the staging directory (does not mutate workspace)
+# Use npm install instead of npm ci to tolerate absence of a lockfile in some environments
+npm install --omit=dev --no-audit --no-fund --prefer-offline --prefix $MODULE_NAME
+
+# 3) Copy runtime assets
+cp -R \
+  companion \
+  dist \
+  $MODULE_NAME
 
 tar -czf "$MODULE_NAME.tgz" $MODULE_NAME
 

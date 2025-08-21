@@ -8,8 +8,9 @@ import { NormalizedCacheObject } from '@apollo/client/cache/index.js'
 import { DomainQuery } from '../graphql-codegen/graphql.js'
 import { AudinateDanteModule } from '../main.js'
 
-export const domainQuery = gql`
-	query Domain($domainIDInput: ID!) {
+// Lightweight query that fetches only RX channel subscription state (no txChannels)
+export const domainSubscriptionsQuery = gql`
+	query DomainSubscriptions($domainIDInput: ID!) {
 		domain(id: $domainIDInput) {
 			id
 			name
@@ -25,21 +26,14 @@ export const domainQuery = gql`
 					status
 					summary
 				}
-				txChannels {
-					id
-					index
-					name
-				}
 			}
 		}
 	}
 `
 
-export type DomainFetchPolicy = 'network-only' | 'cache-first' | 'no-cache'
-
-export async function getDomain(
+export async function getDomainSubscriptions(
 	self: AudinateDanteModule,
-	options?: { policy?: DomainFetchPolicy; errorPolicy?: 'all' | 'none' },
+	useNetworkFirst = true,
 ): Promise<DomainQuery['domain']> {
 	const domainId: string = self.config.domainID
 	try {
@@ -48,24 +42,18 @@ export async function getDomain(
 			throw new Error('ApolloClient is not initialized')
 		}
 
-		// Build query options, allowing overrides of fetch and error policy.
-		const queryOptions: any = {
-			query: domainQuery,
+		const result = await apolloClient.query<DomainQuery>({
+			query: domainSubscriptionsQuery,
 			variables: { domainIDInput: domainId },
-		}
-		if (options?.policy) {
-			queryOptions.fetchPolicy = options.policy
-		}
-		if (options?.errorPolicy) {
-			queryOptions.errorPolicy = options.errorPolicy
-		}
-
-		const result = await apolloClient.query<DomainQuery>(queryOptions)
+			// For polling subscription state we usually want fresh data
+			fetchPolicy: useNetworkFirst ? 'network-only' : 'cache-first',
+			errorPolicy: 'all',
+		})
 
 		return result.data.domain
 	} catch (e) {
 		if (e instanceof Error) {
-			self.log('error', `getDomain for ${domainId}: ${e.message}`)
+			self.log('error', `getDomainSubscriptions for ${domainId}: ${e.message}`)
 			self.log('debug', JSON.stringify(e, null, 2))
 			self.updateStatus(InstanceStatus.Disconnected, e.message)
 		}
