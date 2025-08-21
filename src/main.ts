@@ -38,6 +38,7 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 	// Concurrency control for polling/full fetch
 	private _pollInProgress = false
 	private _forceFullFetchQueued = false
+	private _pollPaused = false
 
 	pollDomainAndUpdateFeedbacksInterval?: NodeJS.Timeout
 
@@ -50,6 +51,30 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 		this.variables = <CompanionVariableValues>{}
 		this.domains = <DomainsQuery['domains']>[]
 		this.domain = <DomainQuery['domain']>{}
+	}
+
+	// Pause periodic polling (e.g., to avoid contention during bulk apply)
+	pausePolling(reason?: string): void {
+		if (this.pollDomainAndUpdateFeedbacksInterval) {
+			clearInterval(this.pollDomainAndUpdateFeedbacksInterval)
+			delete this.pollDomainAndUpdateFeedbacksInterval
+			this._pollPaused = true
+			this.log('info', `Polling paused${reason ? `: ${reason}` : ''}`)
+		}
+	}
+
+	// Resume periodic polling if previously paused
+	resumePolling(): void {
+		if (!this._pollPaused) return
+		this._pollPaused = false
+		if (!this.pollDomainAndUpdateFeedbacksInterval) {
+			const pollInterval = this.config.pollInterval || 5000
+			this.log('info', `Resuming domain update polling (${pollInterval}ms)...`)
+			// eslint-disable-next-line @typescript-eslint/no-misused-promises
+			this.pollDomainAndUpdateFeedbacksInterval = setInterval(async () => {
+				await this.pollDomainAndUpdateFeedbacks()
+			}, pollInterval)
+		}
 	}
 
 	async init(config: ConfigType): Promise<void> {
@@ -343,6 +368,7 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 				label: 'API Host URL',
 				default: 'https://api.director.dante.cloud:443/graphql',
 				width: 8,
+				tooltip: 'GraphQL endpoint for DDM Director. Default: https://api.director.dante.cloud:443/graphql',
 				regex: RegexURL,
 			},
 			{
@@ -350,6 +376,7 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 				type: 'textinput',
 				label: 'API Key',
 				width: 8,
+				tooltip: 'Your DDM API Key. Default: (none)',
 				regex: Regex.SOMETHING,
 			},
 			{
@@ -357,6 +384,7 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 				type: 'dropdown',
 				label: 'Domain',
 				width: 8,
+				tooltip: 'Select the domain to control. Default: None',
 				// isVisible: (configValues) => {
 				// 	if (configValues.apikey) {
 				// 		return true
@@ -382,7 +410,7 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 				type: 'checkbox',
 				label: 'Disable certificate validation',
 				width: 8,
-				tooltip: 'For HTTP endpoints, setting this value has no affect',
+				tooltip: 'For HTTP endpoints, this has no effect. Default: Off',
 				default: false,
 			},
 			{
@@ -390,7 +418,7 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 				type: 'number',
 				label: 'Poll Interval (ms)',
 				width: 8,
-				tooltip: 'How often to refresh domain data. Range: 1000ms (1s) to 60000ms (60s).',
+				tooltip: 'How often to refresh domain data. Range: 1000–60000 ms. Default: 5000 ms',
 				default: 5000,
 				min: 1000,
 				max: 60000,
@@ -400,7 +428,7 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 				type: 'number',
 				label: 'Full Fetch Interval (polls)',
 				width: 8,
-				tooltip: 'How often (in number of polls) to perform a full domain fetch. Default 10.',
+				tooltip: 'How often (in number of polls) to perform a full domain fetch. Default: 10',
 				default: 10,
 				min: 1,
 				max: 1000,
@@ -410,10 +438,58 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 				type: 'number',
 				label: 'Max Channels for Dropdown UI',
 				width: 8,
-				tooltip: 'Maximum RX channels before switching to text-input mode to prevent UI hangs.',
+				tooltip: 'Maximum RX channels before switching to text-input mode. Default: 500',
 				default: 500,
 				min: 10,
 				max: 10000,
+			},
+			{
+				id: 'pausePollingOnBulkApply',
+				type: 'checkbox',
+				label: 'Pause polling during bulk apply',
+				width: 8,
+				tooltip: 'Temporarily pause polling while applying multi-channel subscriptions. Default: On',
+				default: true,
+			},
+			{
+				id: 'bulkBatchSize',
+				type: 'number',
+				label: 'Bulk apply batch size',
+				width: 8,
+				tooltip: 'How many subscriptions to send per request when applying many at once. Default: 10',
+				default: 10,
+				min: 1,
+				max: 100,
+			},
+			{
+				id: 'bulkRetries',
+				type: 'number',
+				label: 'Bulk apply retries',
+				width: 8,
+				tooltip: 'How many times to retry only the missing subscriptions after verification. Default: 3',
+				default: 3,
+				min: 0,
+				max: 10,
+			},
+			{
+				id: 'bulkBatchDelayMs',
+				type: 'number',
+				label: 'Bulk apply batch delay (ms)',
+				width: 8,
+				tooltip: 'Delay between batches to reduce load on busy controllers. Default: 75 ms',
+				default: 75,
+				min: 0,
+				max: 2000,
+			},
+			{
+				id: 'bulkRetryDelayMs',
+				type: 'number',
+				label: 'Bulk apply retry delay (ms)',
+				width: 8,
+				tooltip: 'Delay before each verification retry. Default: 250 ms',
+				default: 250,
+				min: 0,
+				max: 5000,
 			},
 			{
 				id: 'message',

@@ -1,5 +1,9 @@
 import { CompanionActionDefinitions, SomeCompanionActionInputField } from '@companion-module/base'
-import { setDeviceSubscriptions, setMultipleChannelDeviceSubscriptions } from './dante-api/setDeviceSubscriptions.js'
+import {
+	setDeviceSubscriptions,
+	setMultipleChannelDeviceSubscriptions,
+	setMultipleChannelDeviceSubscriptionsWithRetry,
+} from './dante-api/setDeviceSubscriptions.js'
 import { AudinateDanteModule } from './main.js'
 import {
 	parseSubscriptionInfoFromOptions,
@@ -304,8 +308,15 @@ function generateTextInputActions(self: AudinateDanteModule): CompanionActionDef
 				const subscriptionOptions = { deviceId: rxDevice.id, subscriptions }
 
 				try {
-					const result = await setMultipleChannelDeviceSubscriptions(self, subscriptionOptions)
-					if (result) {
+					// Optionally pause polling to avoid contention while applying many changes
+					if (self.config.pausePollingOnBulkApply) self.pausePolling('bulk multi-channel apply')
+					const ok = await setMultipleChannelDeviceSubscriptionsWithRetry(self, subscriptionOptions, {
+						batchSize: self.config.bulkBatchSize ?? 10,
+						retries: self.config.bulkRetries ?? 2,
+						batchDelayMs: self.config.bulkBatchDelayMs ?? 75,
+						retryDelayMs: self.config.bulkRetryDelayMs ?? 250,
+					})
+					if (ok) {
 						self.log(
 							'info',
 							`Multiple subscriptions set for device "${rxDevice.name ?? rxDevice.id}": ${subscriptions.length} channels`,
@@ -316,6 +327,8 @@ function generateTextInputActions(self: AudinateDanteModule): CompanionActionDef
 					}
 				} catch (error) {
 					self.log('error', `Failed to set multiple subscriptions: ${error}`)
+				} finally {
+					if (self.config.pausePollingOnBulkApply) self.resumePolling()
 				}
 			},
 			learn: (action) => {
@@ -362,7 +375,8 @@ function generateTextInputActions(self: AudinateDanteModule): CompanionActionDef
 						} else if (txDevice) {
 							learnedOptions[`txSource${i}`] = txDevice
 						} else {
-							learnedOptions[`txSource${i}`] = ''
+							// When unsubscribed, learn to 'clear' instead of leaving empty (no change)
+							learnedOptions[`txSource${i}`] = 'clear'
 						}
 					}
 				}
@@ -472,8 +486,14 @@ function generateTextInputActions(self: AudinateDanteModule): CompanionActionDef
 				}
 
 				try {
-					const result = await setMultipleChannelDeviceSubscriptions(self, subscriptionOptions)
-					if (result) {
+					if (self.config.pausePollingOnBulkApply) self.pausePolling('bulk multi-channel apply')
+					const ok = await setMultipleChannelDeviceSubscriptionsWithRetry(self, subscriptionOptions, {
+						batchSize: self.config.bulkBatchSize ?? 10,
+						retries: self.config.bulkRetries ?? 2,
+						batchDelayMs: self.config.bulkBatchDelayMs ?? 75,
+						retryDelayMs: self.config.bulkRetryDelayMs ?? 250,
+					})
+					if (ok) {
 						self.log(
 							'info',
 							`Multiple subscriptions set for device "${rxDeviceName}": ${subscriptions.length} channels`,
@@ -484,6 +504,8 @@ function generateTextInputActions(self: AudinateDanteModule): CompanionActionDef
 					}
 				} catch (error) {
 					self.log('error', `Failed to set multiple subscriptions: ${error}`)
+				} finally {
+					if (self.config.pausePollingOnBulkApply) self.resumePolling()
 				}
 			},
 			learn: (action) => {
