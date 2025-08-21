@@ -6,6 +6,8 @@ This module enables the ability to set Dante subscriptions using a managed Dante
 
 See [HELP.md](./companion/HELP.md) for user documentation which is also what is displayed to the user when they click on the help icon in the UI.
 
+For large-domain behavior, actions, feedbacks, and performance notes, see [LARGE_DOMAIN.md](./LARGE_DOMAIN.md).
+
 ### GraphQL CodeGen
 
 GraphQL CodeGen generates TypeScript types based on the GraphQL schema and operations (mutations, queries, etc.)

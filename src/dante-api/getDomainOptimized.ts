@@ -38,7 +38,7 @@ export const domainQueryOptimized = gql`
 
 export async function getDomainOptimized(
 	self: AudinateDanteModule,
-	useNetworkFirst = true
+	useNetworkFirst = true,
 ): Promise<DomainQuery['domain']> {
 	const domainId: string = self.config.domainID
 	try {

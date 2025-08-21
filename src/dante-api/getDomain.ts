@@ -35,7 +35,12 @@ export const domainQuery = gql`
 	}
 `
 
-export async function getDomain(self: AudinateDanteModule): Promise<DomainQuery['domain']> {
+export type DomainFetchPolicy = 'network-only' | 'cache-first' | 'no-cache'
+
+export async function getDomain(
+	self: AudinateDanteModule,
+	options?: { policy?: DomainFetchPolicy; errorPolicy?: 'all' | 'none' },
+): Promise<DomainQuery['domain']> {
 	const domainId: string = self.config.domainID
 	try {
 		const apolloClient: ApolloClient<NormalizedCacheObject> | undefined = self.apolloClient
@@ -43,10 +48,19 @@ export async function getDomain(self: AudinateDanteModule): Promise<DomainQuery[
 			throw new Error('ApolloClient is not initialized')
 		}
 
-		const result = await apolloClient.query<DomainQuery>({
+		// Build query options, allowing overrides of fetch and error policy.
+		const queryOptions: any = {
 			query: domainQuery,
 			variables: { domainIDInput: domainId },
-		})
+		}
+		if (options?.policy) {
+			queryOptions.fetchPolicy = options.policy
+		}
+		if (options?.errorPolicy) {
+			queryOptions.errorPolicy = options.errorPolicy
+		}
+
+		const result = await apolloClient.query<DomainQuery>(queryOptions)
 
 		return result.data.domain
 	} catch (e) {

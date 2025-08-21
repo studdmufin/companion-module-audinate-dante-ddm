@@ -11,7 +11,6 @@ import { ApolloClient, NormalizedCacheObject } from '@apollo/client'
 
 import { getApolloClient } from './apolloClient.js'
 import { getDomain } from './dante-api/getDomain.js'
-import { getDomainOptimized } from './dante-api/getDomainOptimized.js'
 import { getDomainSubscriptions } from './dante-api/getDomainSubscriptions.js'
 import { getDomains } from './dante-api/getDomains.js'
 
@@ -36,8 +35,12 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 	private _lastActionsHash?: string
 	private _lastFeedbacksHash?: string
 
+	// Concurrency control for polling/full fetch
+	private _pollInProgress = false
+	private _forceFullFetchQueued = false
+
 	pollDomainAndUpdateFeedbacksInterval?: NodeJS.Timeout
-	
+
 	// Performance tracking
 	private pollCount = 0
 
@@ -86,15 +89,18 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 		void (async () => {
 			this.log('info', `Getting list of available Domains`)
 			this.domains = await getDomains(this)
-			
+
 			// Debug domain discovery
 			if (!this.domains) {
 				this.log('error', 'Failed to get domains list - check API connection and credentials')
 				return
 			}
-			
-			this.log('debug', `Found ${this.domains.length} domains: ${JSON.stringify(this.domains.map(d => ({id: d?.id, name: d?.name})))}`)
-			
+
+			this.log(
+				'debug',
+				`Found ${this.domains.length} domains: ${JSON.stringify(this.domains.map((d) => ({ id: d?.id, name: d?.name })))}`,
+			)
+
 			if (this.domains.length === 0) {
 				this.updateStatus(InstanceStatus.Connecting, 'No domains discovered - check your API key permissions')
 			} else if (this.config.domainID && this.config.domainID !== 'default') {
@@ -120,56 +126,75 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 	}
 
 	async pollDomainAndUpdateFeedbacks(): Promise<void> {
+		// Prevent overlapping polls
+		if (this._pollInProgress) {
+			this.log('debug', 'Poll skipped: previous poll still in progress')
+			return
+		}
+		this._pollInProgress = true
 		if (!this.config.domainID || this.config.domainID == 'default') {
 			this.updateStatus(InstanceStatus.BadConfig, 'Domain not selected. Please select a domain')
+			this._pollInProgress = false
 			return
 		}
 
 		this.log('debug', `Getting specified Domain (${this.config.domainID})`)
 
 		try {
-            // Decide between lightweight subscription-only polls and full domain fetches.
-            // Perform a full fetch on the first poll and every 10th poll to refresh full metadata.
-            this.pollCount++
+			// Decide between lightweight subscription-only polls and full domain fetches.
+			// Perform a full fetch on the first poll and every 10th poll to refresh full metadata.
+			this.pollCount++
 			const fullFetchInterval = this.config.fullFetchInterval || 10
 			const doFullFetch = this.pollCount === 1 || this.pollCount % fullFetchInterval === 0
 			if (doFullFetch) {
 				this.log('debug', `Poll ${this.pollCount}: performing full domain fetch`)
-				this.domain = await getDomainOptimized(this, true)
+				this.domain = await getDomain(this, { policy: 'network-only', errorPolicy: 'all' })
 			} else {
 				this.log('debug', `Poll ${this.pollCount}: fetching domain subscription state`)
 				this.domain = await getDomainSubscriptions(this, true) // network-first for up-to-date subscription state
 			}
 
 			if (!this.domain) {
-				this.log('error', `Domain ${this.config.domainID} not found. Available domains: ${JSON.stringify(this.domains?.map(d => d?.id))}`)
+				this.log(
+					'error',
+					`Domain ${this.config.domainID} not found. Available domains: ${JSON.stringify(this.domains?.map((d) => d?.id))}`,
+				)
 				this.updateStatus(InstanceStatus.Connecting, 'Domain not found. Please check the selected domain')
 				return
 			}
 
 			this.updateStatus(InstanceStatus.Ok, 'Successfully polled domain')
-			
+
 			// Debug logging for domain data
 			const deviceCount = this.domain?.devices?.length ?? 0
-			const rxChannelCount = this.domain?.devices?.reduce((total, device) => 
-				total + (device?.rxChannels?.length ?? 0), 0) ?? 0
-			const txChannelCount = this.domain?.devices?.reduce((total, device) => 
-				total + (device?.txChannels?.length ?? 0), 0) ?? 0
-			this.log('debug', `Domain loaded: ${deviceCount} devices, ${rxChannelCount} RX channels, ${txChannelCount} TX channels`)
-			
+			const rxChannelCount =
+				this.domain?.devices?.reduce((total, device) => total + (device?.rxChannels?.length ?? 0), 0) ?? 0
+			const txChannelCount =
+				this.domain?.devices?.reduce((total, device) => total + (device?.txChannels?.length ?? 0), 0) ?? 0
+			this.log(
+				'debug',
+				`Domain loaded: ${deviceCount} devices, ${rxChannelCount} RX channels, ${txChannelCount} TX channels`,
+			)
+
 			// Detailed device debugging (show first few devices)
 			if (deviceCount > 0) {
 				const firstDevice = this.domain?.devices?.[0]
-				this.log('debug', `First device: ${firstDevice?.name} (ID: ${firstDevice?.id}) - RX: ${firstDevice?.rxChannels?.length ?? 0}, TX: ${firstDevice?.txChannels?.length ?? 0}`)
+				this.log(
+					'debug',
+					`First device: ${firstDevice?.name} (ID: ${firstDevice?.id}) - RX: ${firstDevice?.rxChannels?.length ?? 0}, TX: ${firstDevice?.txChannels?.length ?? 0}`,
+				)
 			} else {
 				this.log('warn', 'No devices found in domain! Check domain selection and API connectivity.')
 			}
-			
+
 			// Update feedback and action definitions with fresh data
 			// Skip feedback updates for very large domains to prevent system hangs
 			const maxChannels = this.config.maxChannelsForDropdowns || 500
 			if (rxChannelCount > maxChannels) {
-				this.log('warn', `Large domain detected (${rxChannelCount} RX channels > ${maxChannels} limit). Using text-input feedbacks to prevent system hang.`)
+				this.log(
+					'info',
+					`Large domain detected (${rxChannelCount} RX channels > ${maxChannels} limit). Using text-input feedbacks to prevent system hang.`,
+				)
 				if (this.pollCount === 1) {
 					// Only generate minimal feedbacks once for large domains
 					this._maybeUpdateFeedbacks()
@@ -190,11 +215,19 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 		} catch (error) {
 			this.log('error', `Error in pollDomainAndUpdateFeedbacks: ${error}`)
 			// Fall back to original getDomain on error
-			this.domain = await getDomain(this)
+			this.domain = await getDomain(this, { policy: 'network-only', errorPolicy: 'all' })
 			if (this.domain) {
 				this.updateStatus(InstanceStatus.Ok, 'Successfully polled domain (fallback)')
 				this.checkFeedbacks()
 			}
+		} finally {
+			// If a force full fetch was requested during the poll, run it now (serialized)
+			if (this._forceFullFetchQueued) {
+				this._forceFullFetchQueued = false
+				this.log('debug', 'Executing queued force full fetch after poll')
+				await this._doFullFetchInternal()
+			}
+			this._pollInProgress = false
 		}
 	}
 
@@ -205,38 +238,19 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 			return
 		}
 
-		this.log('info', 'Force full fetch requested - performing immediate full domain refresh')
+		// If a poll is running, queue the full fetch to run immediately after
+		if (this._pollInProgress) {
+			this._forceFullFetchQueued = true
+			this.log('debug', 'Force full fetch requested during poll - queued until poll completes')
+			return
+		}
 
+		// Run full fetch under the same lock used by polls
+		this._pollInProgress = true
 		try {
-			// Force a full network fetch (bypass cache)
-			this.domain = await getDomainOptimized(this, true)
-
-			if (!this.domain) {
-				this.log('error', `Domain ${this.config.domainID} not found during force full fetch`)
-				this.updateStatus(InstanceStatus.Connecting, 'Domain not found during force refresh')
-				return
-			}
-
-			this.updateStatus(InstanceStatus.Ok, 'Force full fetch completed successfully')
-			
-			// Debug logging for domain data
-			const deviceCount = this.domain?.devices?.length ?? 0
-			const rxChannelCount = this.domain?.devices?.reduce((total, device) => 
-				total + (device?.rxChannels?.length ?? 0), 0) ?? 0
-			const txChannelCount = this.domain?.devices?.reduce((total, device) => 
-				total + (device?.txChannels?.length ?? 0), 0) ?? 0
-			this.log('info', `Force full fetch completed: ${deviceCount} devices, ${rxChannelCount} RX channels, ${txChannelCount} TX channels`)
-			
-			// Update feedback and action definitions with fresh data
-			this._maybeUpdateFeedbacks()
-			this._maybeUpdateActions()
-			
-			// Force feedback check with fresh data
-			this.checkFeedbacks()
-			
-		} catch (error) {
-			this.log('error', `Error in forceFullFetch: ${error}`)
-			this.updateStatus(InstanceStatus.Disconnected, `Force full fetch failed: ${error}`)
+			await this._doFullFetchInternal()
+		} finally {
+			this._pollInProgress = false
 		}
 	}
 
@@ -250,6 +264,38 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 		this.log('info', `Configuration updated`)
 		this.log('debug', JSON.stringify({ ...config, apikey: '**********' }, null, 2))
 		await this.init(config)
+	}
+
+	// Internal helper to perform a full fetch and update UI, assumes caller serialized access
+	private async _doFullFetchInternal(): Promise<void> {
+		this.log('info', 'Force full fetch - performing immediate full domain refresh')
+		try {
+			this.domain = await getDomain(this, { policy: 'network-only', errorPolicy: 'all' })
+			if (!this.domain) {
+				this.log('error', `Domain ${this.config.domainID} not found during force full fetch`)
+				this.updateStatus(InstanceStatus.Connecting, 'Domain not found during force refresh')
+				return
+			}
+			this.updateStatus(InstanceStatus.Ok, 'Force full fetch completed successfully')
+			// Debug logging for domain data
+			const deviceCount = this.domain?.devices?.length ?? 0
+			const rxChannelCount =
+				this.domain?.devices?.reduce((total, device) => total + (device?.rxChannels?.length ?? 0), 0) ?? 0
+			const txChannelCount =
+				this.domain?.devices?.reduce((total, device) => total + (device?.txChannels?.length ?? 0), 0) ?? 0
+			this.log(
+				'info',
+				`Force full fetch completed: ${deviceCount} devices, ${rxChannelCount} RX channels, ${txChannelCount} TX channels`,
+			)
+			// Update feedback and action definitions with fresh data
+			this._maybeUpdateFeedbacks()
+			this._maybeUpdateActions()
+			// Force feedback check with fresh data
+			this.checkFeedbacks()
+		} catch (error) {
+			this.log('error', `Error in _doFullFetchInternal: ${error}`)
+			this.updateStatus(InstanceStatus.Disconnected, `Force full fetch failed: ${error}`)
+		}
 	}
 
 	// Only set action definitions if they changed to avoid UI thrash
@@ -345,7 +391,7 @@ export class AudinateDanteModule extends InstanceBase<ConfigType> {
 				label: 'Poll Interval (ms)',
 				width: 8,
 				tooltip: 'How often to refresh domain data. Range: 1000ms (1s) to 60000ms (60s).',
-				default: 30000,
+				default: 5000,
 				min: 1000,
 				max: 60000,
 			},
